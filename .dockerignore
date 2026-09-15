@@ -4,6 +4,7 @@ dist
 .github
 test
 scripts
+!scripts/fetch-model.mjs
 *.md
 !README.md
 .env
