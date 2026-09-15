@@ -22,36 +22,46 @@ export interface Engine {
  * `LOOKUPKIT_ENGINES` is raced under a hard timeout and the first non-empty
  * result set wins, so a blocked engine costs nothing but its own slot.
  *
- * ENGINE SURVEY — measured 2026-09-15, headless Chromium, one residential IP,
- * canary query "capital of Australia" scored on whether the word "Canberra"
- * appears anywhere in the result page. Re-run scripts/probe-engines2.mjs to
- * refresh it; these things change.
+ * ENGINE SURVEY — one residential IP, canary query "capital of Australia",
+ * scored on whether the word "Canberra" appears anywhere in the result page.
+ * Both columns measured the same way, minutes apart, varying ONLY the browser
+ * engine. Refresh with `node scripts/probe-engines2.mjs chromium` and
+ * `node scripts/probe-engines2.mjs webkit`; these things change.
  *
- *   yahoo      200  1492ms  RELEVANT    <- the only engine that passed
- *   bing       200   613ms  IRRELEVANT  decoy results, see below
- *   ddg (html) 403   830ms  blocked
- *   ddg (lite) 403   747ms  blocked
- *   qwant      200  2314ms  no results in page
- *   mojeek     200  1563ms  altcha.org CAPTCHA widget
- *   startpage  200  1098ms  22KB page, no results
- *   yandex     200  2209ms  no results in page
- *   ecosia     403   788ms  blocked
+ *                headless Chromium        WebKit (default)
+ *   duckduckgo   403 blocked              200 RELEVANT
+ *   yahoo        200 RELEVANT             200 RELEVANT
+ *   bing         200 IRRELEVANT (decoys)  200 RELEVANT
+ *   yandex       200 no results           200 INCONSISTENT (relevant once,
+ *                                         not on a repeat run)
+ *   qwant        200 no results           200 no results
+ *   mojeek       200 altcha CAPTCHA       200 altcha CAPTCHA
+ *   startpage    200 no results           200 no results
+ *   ecosia       403 blocked              (not retested)
  *
- * Bing deserves its own warning. It does not block; it answers 200 OK, echoes
- * the query correctly in its own search box, and returns results for something
- * else entirely — German model-railway forums for a Hanoi weather query,
- * dictionary definitions for "capital of Australia". A scraper that checks
- * "did I get links back" accepts this silently. It is implemented here and
- * selectable, but it is not a default, and anything downstream of it needs the
- * relevance gate on `/lookup` to catch it.
+ * The lesson is worth more than the table: THREE of these engines look hostile
+ * under Chromium and are perfectly cooperative under WebKit (a fourth, Yandex,
+ * improves but is not dependable). Before concluding
+ * that an engine blocks scrapers, check whether it merely blocks Chromium.
+ * See the comment in src/fetch/browser.ts for the controlled experiment.
  *
- * Brave is implemented NOWHERE, deliberately. It runs a proof-of-work
- * challenge built specifically to stop scrapers
- * (search.brave.com/help/pow-captcha). It is fast and works well right up
- * until it PERMANENTLY blocks the IP — observed in the reference
- * implementation after a single day of ordinary-volume use, after which every
- * search returned zero results. That is not a rate limit you can back off
- * from. Do not add it.
+ * Bing's Chromium behaviour is the one worth remembering, because it is the
+ * failure mode you cannot detect by checking whether you got links back: it
+ * does not block, it answers 200 OK with the query echoed correctly in its own
+ * search box and results for something else entirely — German model-railway
+ * forums for a Hanoi weather query. Under WebKit it returns the right results
+ * for the same queries. It stays off the default list for that reason: an
+ * engine that answers wrong rather than failing is one to keep on a short
+ * leash, even when it currently behaves.
+ *
+ * Brave is implemented NOWHERE, deliberately, and this is NOT the same kind of
+ * problem — do not go looking for a browser engine that gets past it. It runs
+ * a proof-of-work challenge built specifically to stop scrapers
+ * (search.brave.com/help/pow-captcha) and blocks by IP/device, affecting a
+ * hand-driven real browser too. In the reference implementation it worked
+ * beautifully for one day of ordinary-volume use and then PERMANENTLY blocked
+ * the IP, after which every search returned zero results. That is not a rate
+ * limit you can back off from. Do not add it.
  */
 
 function encode(query: string): string {
@@ -100,9 +110,9 @@ export const yahoo: Engine = {
 };
 
 /**
- * NOT a default. Bing answers detected scrapers with plausible-looking results
- * for an unrelated query rather than an error — read the survey note above
- * before enabling it.
+ * Works correctly under WebKit; NOT a default anyway. Under Chromium it
+ * answers detected scrapers with plausible-looking results for an unrelated
+ * query rather than an error — read the survey note above before enabling it.
  */
 export const bing: Engine = {
   name: 'bing',
@@ -151,16 +161,22 @@ export const duckduckgo: Engine = {
   url: (query) => `https://html.duckduckgo.com/html/?q=${encode(query)}`,
   extract: (page, limit) =>
     page.evaluate((limit) => {
+      // Iterate the title anchors rather than result containers: `.web-result`
+      // and `.result__body` both wrap the same result, so selecting on either
+      // pair returns every result twice.
       const out: { title: string; url: string; content: string }[] = [];
-      for (const node of Array.from(document.querySelectorAll('.result__body, .web-result'))) {
-        const a = node.querySelector('a.result__a') as HTMLAnchorElement | null;
-        if (!a?.href?.startsWith('http')) continue;
+      const seen = new Set<string>();
+      for (const a of Array.from(document.querySelectorAll('a.result__a')) as HTMLAnchorElement[]) {
+        if (!a.href.startsWith('http')) continue;
         const host = new URL(a.href).hostname.toLowerCase();
         if (host === 'duckduckgo.com' || host.endsWith('.duckduckgo.com')) continue;
+        if (seen.has(a.href)) continue;
+        seen.add(a.href);
+        const container = a.closest('.result, .web-result, .result__body') ?? a.parentElement;
         out.push({
           title: (a.textContent ?? '').replace(/\s+/g, ' ').trim() || a.href,
           url: a.href,
-          content: (node.querySelector('.result__snippet')?.textContent ?? '')
+          content: (container?.querySelector('.result__snippet')?.textContent ?? '')
             .replace(/\s+/g, ' ')
             .trim(),
         });

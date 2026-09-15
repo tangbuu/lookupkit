@@ -34,7 +34,12 @@ async function runEngine(engine: Engine, query: string, limit: number): Promise<
       timeout: config.searchTimeoutMs,
     });
     const rows = await engine.extract(page, limit);
-    return rows.map((r) => ({ ...r, engine: engine.name }));
+    // Belt-and-braces against an engine's markup listing the same result
+    // twice; a duplicate would otherwise burn one of the parallel fetch slots.
+    const seen = new Set<string>();
+    return rows
+      .filter((r) => !seen.has(r.url) && seen.add(r.url) !== undefined)
+      .map((r) => ({ ...r, engine: engine.name }));
   });
 }
 

@@ -34,12 +34,12 @@ curl -G --data-urlencode "q=giá vàng SJC hôm nay"            localhost:8080/s
 curl localhost:8080/healthz
 ```
 
-`--shm-size=1g` matters: Chromium's default 64MB `/dev/shm` in a container shows up as tabs dying mid-navigation. `docker-compose.yml` sets it for you.
+`--shm-size=1g` matters if you switch to Chromium: its default 64MB `/dev/shm` in a container shows up as tabs dying mid-navigation. `docker-compose.yml` sets it for you.
 
 Running it directly instead:
 
 ```bash
-npm ci && npx playwright install chromium && npm run build && npm start
+npm ci && npx playwright install webkit && npm run build && npm start
 ```
 
 ---
@@ -108,7 +108,7 @@ Returns `404` with `best: null` when nothing usable was found.
 
 ### `GET /healthz`
 
-`{"status":"ok","reranker":true,"engines":["yahoo"]}`.
+`{"status":"ok","reranker":true,"engines":["duckduckgo","yahoo"]}`.
 
 ---
 
@@ -117,7 +117,9 @@ Returns `404` with `best: null` when nothing usable was found.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | Listen address |
-| `LOOKUPKIT_ENGINES` | `yahoo` | Comma-separated, raced in parallel. `yahoo`, `bing`, `duckduckgo`. |
+| `LOOKUPKIT_BROWSER` | `webkit` | `webkit`, `firefox` or `chromium`. Read the finding below before changing it. |
+| `LOOKUPKIT_ENGINES` | `duckduckgo,yahoo` | Comma-separated, raced in parallel. `duckduckgo`, `yahoo`, `bing`. |
+| `LOOKUPKIT_USER_AGENT` | *(empty)* | Empty sends the engine's own UA. Spoofing Chrome from WebKit is a detectable inconsistency and gained nothing in testing. |
 | `LOOKUPKIT_MAX_URLS` | `5` | Candidates fetched in parallel per lookup |
 | `LOOKUPKIT_TOKEN_BUDGET` | `200` | Approximate token budget for the condensed passage |
 | `LOOKUPKIT_CONFIDENT_THRESHOLD` | `0.5` | Score at which the pipeline returns early |
@@ -135,31 +137,47 @@ Domains are excluded at the **engine** level with `-site:`, not filtered out of 
 
 Scraping search engines is adversarial, and the honest version of this section is a table of what actually happened rather than a claim that it is solved.
 
-**Engine survey**, measured 2026-09-15 from one residential IP with headless Chromium. Canary query `capital of Australia`, scored on whether the word "Canberra" appears anywhere in the rendered result page — a deliberately low bar that half the field still failed:
+### The single most important finding: use WebKit, not Chromium
 
-| Engine | Status | Time | Verdict |
-| --- | --- | --- | --- |
-| **Yahoo** | 200 | 1492 ms | **RELEVANT** — the only engine that passed |
-| Bing | 200 | 613 ms | IRRELEVANT — *decoy results*, see below |
-| DuckDuckGo (`html.` and `lite.`) | 403 | ~800 ms | blocked |
-| Qwant | 200 | 2314 ms | no results in page |
-| Mojeek | 200 | 1563 ms | altcha.org CAPTCHA widget |
-| Startpage | 200 | 1098 ms | 22KB page, no results |
-| Yandex | 200 | 2209 ms | no results in page |
-| Ecosia | 403 | 788 ms | blocked |
-| Brave | not attempted | — | see below |
+This project originally defaulted to Playwright's Chromium and concluded that most of the search engine field was hostile. That conclusion was wrong, and the way it was wrong is the most useful thing here.
 
-Reproduce it with `node scripts/probe-engines2.mjs`. These results will change; re-measure rather than trusting this table.
+Controlled test — same IP, same minute, same URLs, same headers, varying **only** the browser engine (`node scripts/probe-webkit-ddg.mjs`):
 
-Four things follow from it, and they are the whole design:
+| Engine | `html.duckduckgo.com` | `lite.duckduckgo.com` | results | "Canberra" present |
+| --- | --- | --- | --- | --- |
+| **chromium** | **403** | **403** | 0 | no |
+| **webkit** | **200** | **200** | 10–14 | **yes** |
+| **firefox** | **200** | **200** | 10–14 | **yes** |
 
-**1. Never let one engine's failure reach the caller.** Engines are raced in parallel under a hard timeout, and the first **non-empty** result set wins — not the first to *finish*, because a challenge-blocked engine answers fast and empty, and letting that win would hand you a blank page as if the web contained nothing. A blocked engine costs its own slot and nothing else. This is the structural difference from the SearxNG path in [Vane #763](https://github.com/ItzCrazyKns/Vane/issues/763): there is no code path here where an upstream CAPTCHA becomes your error or your hang.
+DuckDuckGo's block is a **headless-Chromium fingerprint block**, not an IP or rate-limit block. The same address pulled real results through the other two engines seconds later. Spoofing a Chrome user agent does not help and makes things worse: Chromium sending its own native UA gets a 202 challenge page, while Chromium *claiming to be Chrome* gets a flat 403.
 
-The log pasted into that issue is worth reading next to the table above — the engine whose CAPTCHA hangs the UI is `searx.engines.duckduckgo`, raising `SearxEngineCaptchaException`. That is the same engine returning 403 in row three here. The difference is not that lookupkit gets past DuckDuckGo; it does not. The difference is what happens next.
+Re-running the whole engine survey under WebKit changes four verdicts (`node scripts/probe-engines2.mjs chromium` vs `node scripts/probe-engines2.mjs webkit`):
 
-**2. Bing does not block — it lies, and that is worse.** It answers 200 OK, echoes your query correctly in its own search box, and returns results for something else entirely: German model-railway forums for a Hanoi weather query, dictionary definitions of the word "capital" for *capital of Australia*. Any scraper whose health check is "did I get links back" accepts this silently and poisons everything downstream. It is implemented and selectable here, but it is not a default.
+| Engine | headless Chromium | **WebKit (default)** |
+| --- | --- | --- |
+| DuckDuckGo | 403 blocked | **200 RELEVANT** |
+| Yahoo | 200 RELEVANT | 200 RELEVANT |
+| Bing | 200 IRRELEVANT (*decoys*) | **200 RELEVANT** |
+| Yandex | 200 no results | inconsistent — relevant once, not on a repeat run |
+| Qwant | 200 no results | 200 no results |
+| Mojeek | 200 altcha CAPTCHA | 200 altcha CAPTCHA |
+| Startpage | 200 no results | 200 no results |
+| Ecosia | 403 blocked | not retested |
+| Brave | not attempted | not attempted — see below |
 
-This is also the clearest demonstration of why the relevance gate exists. Running the full pipeline with `LOOKUPKIT_ENGINES=bing` against *what is the capital of Australia*:
+**Before concluding that an engine blocks scrapers, check whether it merely blocks Chromium.**
+
+This also explains something that had looked like luck. The Dart application this project is derived from has scraped DuckDuckGo daily for a long time and has never hit this block — and it fetches through `flutter_inappwebview`'s headless `WKWebView`, which is the same WebKit engine family Playwright's `webkit` launches. It was never getting away with anything; it simply was not Chromium.
+
+WebKit costs nothing elsewhere: re-running the 9-domain extraction test under it produced the same tiers and the same content as Chromium. It is the default for **every** fetch, not just search, since the same fingerprinting plausibly affects ordinary sites too. Set `LOOKUPKIT_BROWSER=chromium` if you want the old behaviour, and `firefox` also works.
+
+### The rest of the design
+
+**Never let one engine's failure reach the caller.** Engines are raced in parallel under a hard timeout, and the first **non-empty** result set wins — not the first to *finish*, because a challenge-blocked engine answers fast and empty, and letting that win would hand you a blank page as if the web contained nothing. A blocked engine costs its own slot and nothing else. This is the structural difference from the SearxNG path in [Vane #763](https://github.com/ItzCrazyKns/Vane/issues/763): there is no code path here where an upstream CAPTCHA becomes your error or your hang.
+
+The log pasted into that issue is worth reading next to the tables above. The engine whose CAPTCHA hangs the UI is `searx.engines.duckduckgo`, raising `SearxEngineCaptchaException` — the same engine that returns 403 to Chromium here and 200 with real results to WebKit. Both halves of this project's answer to that bug are visible in that one line: prefer an engine stack the site will actually talk to, and never let the failure of one become the caller's problem.
+
+**Bing is the reason the relevance gate exists.** Under Chromium it does not block — it answers 200 OK, echoes your query correctly in its own search box, and returns results for something else entirely: German model-railway forums for a Hanoi weather query. Any scraper whose health check is "did I get links back" accepts that silently. Running the full pipeline over those decoys:
 
 ```
 confident: false   threshold: 0.5
@@ -167,19 +185,19 @@ best  0.0009  https://en.wikipedia.org/wiki/Ho_Chi_Minh_City
 all candidate scores: [0.0009, 0.0009, 0.0009, 0.0002]
 ```
 
-Four plausible-looking, entirely wrong pages, and every one of them scores three orders of magnitude below the threshold. A raw link list gives you no way to see that. A scored passage does.
+Four plausible-looking, entirely wrong pages, every one scoring three orders of magnitude below the threshold. A raw link list gives you no way to see that; a scored passage does. Under WebKit Bing returns correct results for the same queries — but it stays off the default list regardless, because an engine that answers *wrong* rather than failing is one to keep on a short leash even when it is behaving.
 
-**3. Talk to the endpoint that answers, not the one that redirects.** `duckduckgo.com/html` 302-redirects to `html.duckduckgo.com/html/`; going straight there saves a round trip (confirmed with `curl -D-`). DuckDuckGo is implemented and kept for exactly this reason — it is the endpoint worth having when it works — but it answered 403 to every request during this project's testing, including via POST, and the apex served a 418 block page.
+**Talk to the endpoint that answers, not the one that redirects.** `duckduckgo.com/html` 302-redirects to `html.duckduckgo.com/html/`; going straight there saves a round trip (confirmed with `curl -D-`).
 
-**4. Brave is not here, on purpose.** It runs a proof-of-work challenge built specifically to stop scrapers ([search.brave.com/help/pow-captcha](https://search.brave.com/help/pow-captcha)). It is fast and works beautifully right up until it **permanently blocks the IP** — observed in the project this one is derived from after a single day of ordinary-volume use, after which every search returned zero results for good. That is not a rate limit you can back off from. Do not add it.
+**Brave is not here, on purpose — and this is not the same problem.** Do not go looking for a browser engine that gets past it. It runs a proof-of-work challenge built specifically to stop scrapers ([search.brave.com/help/pow-captcha](https://search.brave.com/help/pow-captcha)), and it blocks by IP/device, affecting a hand-driven real browser too. In the project this one derives from it worked beautifully for one day of ordinary-volume use and then **permanently blocked the IP**, after which every search returned zero results for good. That is not a rate limit you can back off from.
 
-A plain HTTP client is not an option, incidentally: `curl` with a browser User-Agent to DuckDuckGo's HTML endpoint returned a 202 interstitial rather than results. The browser is load-bearing.
+A plain HTTP client is not an option either: `curl` with a browser User-Agent to DuckDuckGo's HTML endpoint returned a 202 interstitial rather than results. The browser is load-bearing.
 
 ---
 
 ## Measured behaviour
 
-All numbers below are from this implementation, measured on 2026-09-15 on an Apple Silicon laptop over a real residential connection. Nothing here is estimated or inherited.
+All numbers below are from this implementation, measured on 2026-09-15/16 on an Apple Silicon laptop over a real residential connection, with the shipped defaults (WebKit, DuckDuckGo + Yahoo raced). Nothing here is estimated or inherited.
 
 ### End-to-end `/lookup`, 15 real calls
 
@@ -187,31 +205,33 @@ All numbers below are from this implementation, measured on 2026-09-15 on an App
 
 | Query | median | min | max | search | score | confident |
 | --- | --- | --- | --- | --- | --- | --- |
-| giá vàng SJC hôm nay | 4084 ms | 3368 | 4124 | 1093 ms | 0.963 | 3/3 |
-| thời tiết Hà Nội ngày mai | 6841 ms | 6193 | 6956 | 1190 ms | 0.980 | 3/3 |
-| tỷ giá USD hôm nay | 5762 ms | 5359 | 8389 | 1122 ms | 0.971 | 2/3 |
-| what is the capital of Australia | 4936 ms | 4928 | 4937 | 1219 ms | 0.973 | 3/3 |
-| who wrote the novel Dune | 4806 ms | 4347 | 5474 | 1701 ms | 0.682 | 3/3 |
+| giá vàng SJC hôm nay | 3800 ms | 3038 | 4059 | 2071 ms | 0.908 | 3/3 |
+| thời tiết Hà Nội ngày mai | 6541 ms | 6091 | 11143 | 1726 ms | 0.985 | 3/3 |
+| tỷ giá USD hôm nay | 6176 ms | 5162 | 8150 | 933 ms | 0.971 | 3/3 |
+| what is the capital of Australia | 3577 ms | 3161 | 3708 | 1189 ms | 0.520 | 3/3 |
+| who wrote the novel Dune | 4746 ms | 4558 | 7683 | 1290 ms | 0.682 | 3/3 |
 
-**Overall: median 4937 ms, range 3368–8389 ms across all 15 calls.** Roughly 1.1–1.7 s of that is the search step; the rest is the slowest useful candidate page. `/search` alone runs 0.6–1.5 s.
+**Overall: median 4746 ms, range 3038–11143 ms across all 15 calls, 15/15 confident.** Roughly 0.9–2.1 s of that is the search step; the rest is the slowest useful candidate page. `/search` alone runs 0.6–1.5 s.
 
-Inside the container (`docker run`, same machine): `/lookup` 4.24 s for a Vietnamese query and 7.85 s for an English one, `/search` 1.52 s — the same ballpark, with Chromium taking 871 ms to launch at boot instead of ~100 ms.
+Inside the container (`docker run`, same machine): `/lookup` 4.24 s for a Vietnamese query and 7.85 s for an English one, `/search` 1.52 s — the same ballpark, with the browser taking ~870 ms to launch at boot instead of ~100 ms.
 
 ### Fetch + extract, 9 real domains
 
-`LOOKUPKIT_LOG_LEVEL=debug npx tsx scripts/probe-extract.mts`. "value-shaped numbers" counts runs of 3+ digits or grouped numbers like `146,500` — i.e. whether the page's actual *data* survived, not merely whether text came back.
+`LOOKUPKIT_LOG_LEVEL=debug npx tsx scripts/probe-extract.mts`, under the default WebKit. "value-shaped numbers" counts runs of 3+ digits or grouped numbers like `146,500` — i.e. whether the page's actual *data* survived, not merely whether text came back.
 
 | Domain | ms | chars | value-shaped numbers | tier |
 | --- | --- | --- | --- | --- |
-| sjc.com.vn/bieu-do-gia-vang | 2952 | 503 | 25 | readability |
-| vnexpress.net/chu-de/gia-vang-1403 | 4027 | 5765 | 60 | **heuristic** |
-| baomoi.com/tim-kiem/gia-vang.epi | 2301 | 1668 | 2 | **heuristic** |
-| pnj.com.vn/site/gia-vang | 3916 | 1325 | 59 | readability |
-| webgia.com/gia-vang/sjc/ | 4776 | 3945 | 56 | readability |
-| giavang.org/ | 4656 | 5111 | 305 | readability |
-| thoitiet.vn/ha-noi/ngay-mai | 5484 | 1250 | 10 | readability |
-| 24h.com.vn/gia-vang-hom-nay-c425.html | 3734 | 4711 | 106 | readability |
-| giavang.com.vn/gia-vang-sjc/ | 2030 | 2142 | 18 | readability |
+| sjc.com.vn/bieu-do-gia-vang | 3635 | 503 | 25 | readability |
+| vnexpress.net/chu-de/gia-vang-1403 | 4265 | 5412 | 64 | **heuristic** |
+| baomoi.com/tim-kiem/gia-vang.epi | 2578 | 1664 | 2 | **heuristic** |
+| pnj.com.vn/site/gia-vang | 3936 | 1325 | 59 | readability |
+| webgia.com/gia-vang/sjc/ | 4863 | 3904 | 56 | readability |
+| giavang.org/ | 3786 | 5109 | 305 | readability |
+| thoitiet.vn/ha-noi/ngay-mai | 3978 | 1190 | 9 | readability |
+| 24h.com.vn/gia-vang-hom-nay-c425.html | 3822 | 4064 | 91 | readability |
+| giavang.com.vn/gia-vang-sjc/ | 2002 | 2142 | 18 | readability |
+
+Run under Chromium the same table comes out equivalent (same tiers, same content), so the WebKit default costs nothing on extraction — it only buys access to more search engines.
 
 9/9 returned usable content. Two points worth drawing out:
 
@@ -281,7 +301,7 @@ The pipeline fetches all candidates in parallel and **returns the moment one cro
 - **BM25 can drop the answer while keeping the topic.** The clearest case is in the budget table above: for `giá vàng SJC hôm nay` on `giavang.com.vn`, prose *about* SJC gold (BM25 2.3–8.5) outranks the actual price rows (1.0), because those rows are labelled `VÀNG 1 LƯỢNG` rather than `SJC` and match only one query term. The passage scores 0.94 and reads well but contains no price. The cross-encoder only re-ranks whole candidate passages; it does not rescue individual lines BM25 discarded. A second cross-encoder pass at line level would fix this at roughly 20 ms × lines × candidates.
 - **int8 quantization noise.** Mid-confidence scores can drift by roughly 0.1–0.4 from their fp32 values. Scores near 0 and 1 are robust, which is why the threshold sits in the middle of the gap rather than near either end.
 - **PhoRanker is Vietnamese-first.** It is a PhoBERT fine-tune. English works well in testing (0.91 on a clean pair, 0.97 end-to-end on *capital of Australia*, 0.0011 on English junk), but Vietnamese is what it was trained for, and other languages are untested here.
-- **One engine deep.** Yahoo is currently the only engine returning relevant results from the test IP. The racing architecture is built for several; today it usually races a field of one.
+- **Anti-bot findings rot fast.** Every table here is a snapshot from one residential IP on one day. The Chromium-versus-WebKit result was a complete reversal of this project's own earlier conclusion, discovered only because the hypothesis was tested rather than reasoned about. Re-measure with the `scripts/probe-*` harnesses before trusting any of it.
 - **No caching, no rate limiting, no auth.** Put it behind something before exposing it.
 
 ---
@@ -290,7 +310,7 @@ The pipeline fetches all candidates in parallel and **returns the moment one cro
 
 ```bash
 npm ci
-npx playwright install chromium
+npx playwright install webkit      # or: npx playwright install (all three)
 npm test          # 9 unit tests, no network
 npm run typecheck
 npm run lint

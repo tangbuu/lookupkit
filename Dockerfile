@@ -23,9 +23,13 @@ RUN npm run build
 RUN npm ci --omit=dev
 
 # --- runtime stage ----------------------------------------------------------
-# The official Playwright image carries Chromium plus the ~100 shared libraries
-# it needs (fonts, GTK, NSS, libasound...). Installing those onto a plain slim
-# base by hand is the usual source of "works locally, blank pages in Docker".
+# The official Playwright image carries Chromium, Firefox AND WebKit plus the
+# several hundred shared libraries they need (fonts, GTK, NSS, libasound...).
+# Verified in the image rather than assumed: /ms-playwright holds webkit-2359
+# and firefox-1543 alongside chromium-1243, which is exactly what this project
+# needs, since it defaults to WebKit (see src/fetch/browser.ts). Installing
+# those libraries onto a plain slim base by hand is the usual source of "works
+# locally, blank pages in Docker".
 # The tag MUST match the playwright version in package.json — the npm package
 # looks for a browser build keyed to its own version.
 FROM mcr.microsoft.com/playwright:v1.63.0-noble AS runtime

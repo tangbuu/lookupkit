@@ -5,8 +5,10 @@ services:
     ports:
       - '8080:8080'
     environment:
-      # Only yahoo by default — see src/search/engines.ts for the engine survey.
-      LOOKUPKIT_ENGINES: yahoo
+      # WebKit, not Chromium: DuckDuckGo 403s headless Chromium and serves
+      # WebKit real results from the same IP. See src/fetch/browser.ts.
+      LOOKUPKIT_BROWSER: webkit
+      LOOKUPKIT_ENGINES: duckduckgo,yahoo
       LOOKUPKIT_MAX_URLS: '5'
       LOOKUPKIT_TOKEN_BUDGET: '200'
       LOOKUPKIT_CONFIDENT_THRESHOLD: '0.5'

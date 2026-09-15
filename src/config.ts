@@ -23,11 +23,17 @@ export const config = {
   host: str('HOST', '0.0.0.0'),
 
   /**
-   * Engines raced per search. Default is `yahoo` alone because it is the only
-   * engine that answered with RELEVANT results during this project's testing —
-   * see the survey table in src/search/engines.ts before adding another.
+   * Browser engine for every fetch: `webkit` (default), `firefox` or
+   * `chromium`. Read the comment in src/fetch/browser.ts before changing it —
+   * Chromium is measurably blocked by search engines that serve WebKit fine.
    */
-  engines: str('LOOKUPKIT_ENGINES', 'yahoo')
+  browser: str('LOOKUPKIT_BROWSER', 'webkit') as 'webkit' | 'firefox' | 'chromium',
+
+  /**
+   * Engines raced per search. See the survey table in src/search/engines.ts —
+   * which engines work depends heavily on `browser` above.
+   */
+  engines: str('LOOKUPKIT_ENGINES', 'duckduckgo,yahoo')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
@@ -60,10 +66,12 @@ export const config = {
     path.join(repoRoot, 'models', 'phoranker_tokenizer.json'),
   ),
 
-  userAgent: str(
-    'LOOKUPKIT_USER_AGENT',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  ),
+  /**
+   * Empty (the default) sends the browser engine's own user agent. Claiming to
+   * be Chrome from a WebKit engine is a detectable inconsistency and measured
+   * here it gained nothing.
+   */
+  userAgent: str('LOOKUPKIT_USER_AGENT', ''),
 
   /**
    * Excluded at the ENGINE level via the `-site:` operator rather than
