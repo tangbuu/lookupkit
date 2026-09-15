@@ -1,0 +1,17 @@
+services:
+  lookupkit:
+    build: .
+    image: lookupkit:latest
+    ports:
+      - '8080:8080'
+    environment:
+      # Only yahoo by default — see src/search/engines.ts for the engine survey.
+      LOOKUPKIT_ENGINES: yahoo
+      LOOKUPKIT_MAX_URLS: '5'
+      LOOKUPKIT_TOKEN_BUDGET: '200'
+      LOOKUPKIT_CONFIDENT_THRESHOLD: '0.5'
+      LOOKUPKIT_LOG_LEVEL: info
+    # Chromium's default 64MB /dev/shm is not enough for several pages at once
+    # and shows up as tabs crashing mid-navigation.
+    shm_size: '1gb'
+    restart: unless-stopped
