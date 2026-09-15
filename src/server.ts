@@ -4,6 +4,7 @@ import { closeBrowser, getBrowser } from './fetch/browser.js';
 import { log } from './logger.js';
 import { runLookup, runSearch } from './pipeline.js';
 import { ensureRerankerLoaded, isRerankerEnabled } from './rank/reranker.js';
+import { warmUpEngines } from './search/search.js';
 
 function send(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body, null, 2);
@@ -79,9 +80,14 @@ server.listen(config.port, config.host, () => {
     engines: config.engines,
     reranker: isRerankerEnabled(),
   });
-  // Pay the browser launch and the ~136MB model load now, while nobody is
-  // waiting on a request.
-  void getBrowser().catch((e: unknown) => log.error('browser warmup failed', String(e)));
+  // Pay the browser launch, the ~136MB model load, and the DNS+TCP+TLS
+  // handshake to each search engine now, while nobody is waiting on a
+  // request — see warmUpEngines' doc comment for why that last part runs
+  // sequentially rather than racing every engine at once like a real
+  // request does.
+  void getBrowser()
+    .then(() => warmUpEngines())
+    .catch((e: unknown) => log.error('browser/search warmup failed', String(e)));
   if (isRerankerEnabled()) {
     void ensureRerankerLoaded().catch((e: unknown) => log.error('reranker warmup failed', String(e)));
   }
