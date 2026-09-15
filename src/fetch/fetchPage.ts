@@ -24,7 +24,7 @@ export interface FetchedPage {
  * the wait times out we extract whatever is on screen rather than discarding a
  * page that was in fact ready.
  */
-export async function fetchAndExtract(url: string): Promise<FetchedPage> {
+export async function fetchAndExtract(url: string, signal?: AbortSignal): Promise<FetchedPage> {
   const t0 = Date.now();
   try {
     return await withPage(async (page) => {
@@ -44,7 +44,7 @@ export async function fetchAndExtract(url: string): Promise<FetchedPage> {
       }
       log.debug(`fetch(${url}) ${ms}ms -> OK ${text.length} chars via ${tier}`);
       return { url, ms, text, tier, chars: text.length };
-    });
+    }, signal);
   } catch (err) {
     const message = err instanceof Error ? err.message.split('\n')[0]! : String(err);
     log.debug(`fetch(${url}) ${Date.now() - t0}ms -> ERROR: ${message}`);

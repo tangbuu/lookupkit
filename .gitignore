@@ -4,3 +4,8 @@ dist/
 .env
 .DS_Store
 .eslintcache
+
+# 135.76MB — over GitHub's 100MB hard limit, which is why it's gitignored
+# rather than committed. Fetched by scripts/fetch-model.mjs (checksum-
+# verified either way, downloaded only if genuinely missing).
+models/phoranker_int8.onnx

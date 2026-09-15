@@ -1,6 +1,7 @@
 import { chromium, firefox, webkit, type Browser, type BrowserContext, type Page } from 'playwright';
 import { config } from '../config.js';
 import { log } from '../logger.js';
+import { isUrlSafeToFetch } from './ssrf.js';
 
 /**
  * The browser engine is the single highest-impact setting in this project, and
@@ -65,30 +66,52 @@ function isBlockedDomain(hostname: string): boolean {
 let browser: Browser | null = null;
 let starting: Promise<Browser> | null = null;
 
+/**
+ * Both failure modes found in review are fixed by the same rule: `starting`
+ * must be cleared whenever the browser it resolves to stops being usable,
+ * so the NEXT call actually retries instead of forever returning a promise
+ * that already resolved to a dead browser (crash) or already rejected
+ * (transient launch failure at boot bricking the process for its whole
+ * lifetime).
+ */
 export async function getBrowser(): Promise<Browser> {
   if (browser?.isConnected()) return browser;
-  starting ??= (async () => {
+  if (!starting) {
     const engine = config.browser;
     const launcher = LAUNCHERS[engine];
-    const t0 = Date.now();
-    browser = await launcher.launch({
-      // Chromium-only flags. `--no-sandbox` and `--disable-dev-shm-usage` are
-      // needed in most containers; the Blink automation flag is a (partial,
-      // as the table above shows) attempt at looking less automated. WebKit
-      // and Firefox take neither and would fail to launch if given them.
-      ...(engine === 'chromium'
-        ? {
-            args: [
-              '--disable-blink-features=AutomationControlled',
-              '--no-sandbox',
-              '--disable-dev-shm-usage',
-            ],
-          }
-        : {}),
+    starting = (async () => {
+      const t0 = Date.now();
+      const b = await launcher.launch({
+        // Chromium-only flags. `--no-sandbox` and `--disable-dev-shm-usage` are
+        // needed in most containers; the Blink automation flag is a (partial,
+        // as the table above shows) attempt at looking less automated. WebKit
+        // and Firefox take neither and would fail to launch if given them.
+        ...(engine === 'chromium'
+          ? {
+              args: [
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+              ],
+            }
+          : {}),
+      });
+      log.info(`${engine} launched in ${Date.now() - t0}ms`);
+      b.on('disconnected', () => {
+        log.warn(`${engine} disconnected — next getBrowser() call will relaunch`);
+        if (browser === b) browser = null;
+        starting = null;
+      });
+      browser = b;
+      return b;
+    })().catch((err: unknown) => {
+      // A launch failure must not brick every future call — clear the memo
+      // so the NEXT request gets a fresh attempt instead of the same
+      // rejected promise forever.
+      starting = null;
+      throw err;
     });
-    log.info(`${engine} launched in ${Date.now() - t0}ms`);
-    return browser;
-  })();
+  }
   return starting;
 }
 
@@ -126,9 +149,23 @@ async function installBlocking(page: Page): Promise<void> {
   // tables from JS that waits on CSS, and blocking CSS leaves those tables
   // permanently empty — a real bug found in the reference implementation,
   // where the page looked "slow" but was actually broken.
-  await page.route('**/*', (route) => {
+  await page.route('**/*', async (route) => {
     const request = route.request();
     const type = request.resourceType();
+
+    // SSRF guard, checked first and on every hop of a redirect chain (each
+    // redirect is a new intercepted request through this same handler): a
+    // search result — or a page IT redirects to — must not be allowed to
+    // point this browser at a private/loopback/internal address. See
+    // ssrf.ts's doc comment for the exact exploit this closes.
+    if (request.isNavigationRequest()) {
+      const check = await isUrlSafeToFetch(request.url());
+      if (!check.safe) {
+        log.warn(`blocked navigation: ${check.reason}`);
+        return route.abort();
+      }
+    }
+
     if (type === 'image' || type === 'media' || type === 'font') return route.abort();
 
     // Ad content is commonly iframe-embedded, and extractContent() only
@@ -150,17 +187,56 @@ async function installBlocking(page: Page): Promise<void> {
     // script is frequently what renders its content (including the
     // search engines' own href-rewriting script), but a third-party
     // script is overwhelmingly analytics/ads/chat-widget weight.
-    if (type === 'script' && hostname !== new URL(page.url()).hostname) return route.abort();
+    // Defensive: `page.url()` is `about:blank` (empty hostname, no throw) on
+    // a fresh page in practice, so this hasn't been observed to throw, but
+    // costs nothing to guard.
+    let pageHostname = '';
+    try {
+      pageHostname = new URL(page.url()).hostname;
+    } catch {
+      /* leave empty — treat as third-party below */
+    }
+    if (type === 'script' && hostname !== pageHostname) return route.abort();
 
     return route.continue();
   });
 }
 
 /**
- * One throwaway context per page load, up to `config.maxUrls` (5) of these
- * running concurrently from `runLookup()`'s `Promise.all`-style fan-out.
- * Isolates cookies/storage between the sites we visit, so a consent banner
- * or tracking cookie picked up on one candidate cannot leak into the next.
+ * Caps how many `withPage` contexts can be open at once, process-wide. Concurrent
+ * contexts are cheap on this stack (measured — see below), but "cheap" is not
+ * "free": with no cap at all, review found N simultaneous `/lookup` requests each
+ * fan out to `maxUrls` contexts with no queue, so a handful of concurrent callers
+ * multiplies unboundedly instead of queueing — a trivial resource-exhaustion path
+ * for a service meant to run unauthenticated on the internet.
+ */
+let activeFetches = 0;
+const fetchQueue: (() => void)[] = [];
+
+function acquireFetchSlot(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const tryAcquire = (): void => {
+      if (activeFetches < config.maxConcurrentFetches) {
+        activeFetches += 1;
+        resolve();
+      } else {
+        fetchQueue.push(tryAcquire);
+      }
+    };
+    tryAcquire();
+  });
+}
+
+function releaseFetchSlot(): void {
+  activeFetches -= 1;
+  fetchQueue.shift()?.();
+}
+
+/**
+ * One throwaway context per page load, queued behind {@link acquireFetchSlot}
+ * once `config.maxConcurrentFetches` are already open. Isolates cookies/storage
+ * between the sites we visit, so a consent banner or tracking cookie picked up
+ * on one candidate cannot leak into the next.
  *
  * This isolation is specifically about FETCH targets — arbitrary,
  * unrelated third-party sites where one candidate's cookies must never
@@ -175,22 +251,47 @@ async function installBlocking(page: Page): Promise<void> {
  * amortizes fixed overhead, it does not add per-context penalty) and grew
  * real OS-level browser-process-tree RSS by well under 1MB per 5-way batch
  * after the first-ever context's one-time ~43MB warmup. So a 5-way parallel
- * batch here is both faster AND cheaper per candidate than doing the same 5
- * one at a time — no pooling or fan-out reduction is warranted.
+ * batch WITHIN one request is both faster AND cheaper per candidate than doing
+ * the same 5 one at a time — that finding is about per-request fan-out, not
+ * about how many requests the process should serve at once, which is what the
+ * cap above is for.
+ *
+ * `signal`, if given, both skips the wait when already aborted and closes the
+ * context early if aborted mid-flight — used by the caller to free a slot the
+ * moment a lookup no longer needs this particular candidate (e.g. a sibling
+ * candidate already answered confidently) instead of holding it to its own
+ * timeout for nothing.
  */
-export async function withPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
-  const b = await getBrowser();
-  let ctx: BrowserContext | null = null;
+export async function withPage<T>(fn: (page: Page) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) throw new Error('aborted before a fetch slot was acquired');
+  await acquireFetchSlot();
   try {
-    ctx = await b.newContext(newContextOptions(true));
-    await ctx.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
-    const page = await ctx.newPage();
-    await installBlocking(page);
-    return await fn(page);
+    const b = await getBrowser();
+    let ctx: BrowserContext | null = null;
+    try {
+      if (signal?.aborted) throw new Error('aborted while waiting for a fetch slot');
+      ctx = await b.newContext(newContextOptions(true));
+      ctx.setDefaultTimeout(config.fetchTimeoutMs);
+      const liveCtx = ctx;
+      const onAbort = (): void => {
+        void liveCtx.close().catch(() => undefined);
+      };
+      signal?.addEventListener('abort', onAbort);
+      try {
+        await ctx.addInitScript(() => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        });
+        const page = await ctx.newPage();
+        await installBlocking(page);
+        return await fn(page);
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
+      }
+    } finally {
+      await ctx?.close().catch(() => undefined);
+    }
   } finally {
-    await ctx?.close().catch(() => undefined);
+    releaseFetchSlot();
   }
 }
 
@@ -199,7 +300,8 @@ let startingSearchContext: Promise<BrowserContext> | null = null;
 
 async function getSearchContext(): Promise<BrowserContext> {
   if (searchContext) return searchContext;
-  startingSearchContext ??= (async () => {
+  if (startingSearchContext) return startingSearchContext;
+  startingSearchContext = (async () => {
     const b = await getBrowser();
     // Both configured engines are confirmed server-rendered (see engines.ts
     // and README): DuckDuckGo and Yahoo's result markup is present without
@@ -216,12 +318,24 @@ async function getSearchContext(): Promise<BrowserContext> {
     // confirmed directly before relying on it, not assumed from WKWebView's
     // behaviour.
     const ctx = await b.newContext(newContextOptions(false));
+    ctx.setDefaultTimeout(config.fetchTimeoutMs);
     await ctx.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
+    ctx.on('close', () => {
+      // A context can die independently of the browser (e.g. an internal
+      // crash) — without this, `searchContext` would still be a truthy
+      // reference to a dead context and every search would break until
+      // relaunch. See the same fix on `getBrowser`.
+      if (searchContext === ctx) searchContext = null;
+      startingSearchContext = null;
+    });
     searchContext = ctx;
     return ctx;
-  })();
+  })().catch((err: unknown) => {
+    startingSearchContext = null;
+    throw err;
+  });
   return startingSearchContext;
 }
 

@@ -13,7 +13,7 @@
  * nonsense BM25 matches (the reference implementation hit exactly this: a
  * query fragment "m" matching an unrelated line). `[\p{L}\p{N}]` with the `u`
  * flag matches every Unicode letter/number instead. See
- * test/tokenize.test.ts — this is asserted, not assumed.
+ * test/rank.test.ts — this is asserted, not assumed.
  */
 const WORD_RE = /[\p{L}\p{N}]+/gu;
 

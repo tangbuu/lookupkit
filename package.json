@@ -13,14 +13,14 @@
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src scripts --ext .ts",
+    "lint": "eslint src scripts test --ext .ts,.mts,.mjs",
     "test": "node --test --import tsx test/*.test.ts"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "jsdom": "^26.1.0",
     "onnxruntime-node": "^1.22.0",
-    "playwright": "^1.50.0"
+    "playwright": "1.63.0"
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",

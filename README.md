@@ -302,7 +302,7 @@ The pipeline fetches all candidates in parallel and **returns the moment one cro
 - **int8 quantization noise.** Mid-confidence scores can drift by roughly 0.1–0.4 from their fp32 values. Scores near 0 and 1 are robust, which is why the threshold sits in the middle of the gap rather than near either end.
 - **PhoRanker is Vietnamese-first.** It is a PhoBERT fine-tune. English works well in testing (0.91 on a clean pair, 0.97 end-to-end on *capital of Australia*, 0.0011 on English junk), but Vietnamese is what it was trained for, and other languages are untested here.
 - **Anti-bot findings rot fast.** Every table here is a snapshot from one residential IP on one day. The Chromium-versus-WebKit result was a complete reversal of this project's own earlier conclusion, discovered only because the hypothesis was tested rather than reasoned about. Re-measure with the `scripts/probe-*` harnesses before trusting any of it.
-- **No caching, no rate limiting, no auth.** Put it behind something before exposing it.
+- **Caching, rate limiting, and SSRF protection are now real but basic.** A single most-recent-query cache (`src/search/search.ts`), a per-IP token bucket (`src/server.ts`), a process-wide cap on concurrent browser contexts, and a private/loopback/link-local IP block before every navigation (`src/fetch/ssrf.ts`, re-checked on every redirect hop) are all in place after a pre-publish security review. None of this is a substitute for a real reverse proxy/WAF in front of an internet-facing deployment — no auth exists at all, and the rate limiter is in-process memory, not shared across replicas.
 
 ---
 
@@ -321,7 +321,7 @@ npm run dev       # tsx watch
 
 **On the tokenizer:** transformers.js does load `itdainb/PhoRanker`'s tokenizer correctly out of the box — that was verified first. It was not kept, because it costs ~200MB of `node_modules` (including a second ONNX runtime) to run a BPE whose whole definition is four lines of `tokenizer.json`: whitespace pre-tokenizer, no normalizer, `</w>` end-of-word suffix, and a `<s> A </s></s> B </s>` pair template. `src/rank/phobertTokenizer.ts` implements those directly in ~80 lines and reads PhoRanker's own `tokenizer.json`; `test/tokenizer.test.ts` asserts its output is **bit-identical** to transformers.js across 8 cases covering Vietnamese diacritics, English, underscore-joined compounds, punctuation, numerics and truncation.
 
-**Note on repository size:** the int8 model is a 136MB file committed directly to git. That is fine for a local clone and unpleasant for a public repository; consider `git lfs` or a release-asset download step before publishing.
+**Note on repository size:** the int8 model was committed directly to git for early development, then removed from history entirely (`git filter-repo`, not just a later delete-commit — GitHub hard-rejects any push containing a file over 100MB, and a delete-commit alone leaves the 130MB blob in history, still rejected). It is now downloaded at Docker build time by `scripts/fetch-model.mjs` against a pinned SHA-256 checksum, from a GitHub Release asset rather than git-lfs (LFS's free bandwidth tier is 1GB/month — exhausted after roughly 8 clones of a 130MB file, after which every clone fails for everyone until someone pays; a Release asset has no such limit).
 
 ---
 

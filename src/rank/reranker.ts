@@ -36,15 +36,23 @@ export function isRerankerEnabled(): boolean {
 export async function ensureRerankerLoaded(): Promise<void> {
   if (!config.rerankerEnabled) return;
   if (session && tokenizer) return;
-  loading ??= (async () => {
-    const t0 = Date.now();
-    tokenizer = PhobertTokenizer.fromFile(config.tokenizerPath);
-    session = await ort.InferenceSession.create(config.modelPath, {
-      intraOpNumThreads: 2,
-      graphOptimizationLevel: 'all',
+  if (!loading) {
+    loading = (async () => {
+      const t0 = Date.now();
+      tokenizer = PhobertTokenizer.fromFile(config.tokenizerPath);
+      session = await ort.InferenceSession.create(config.modelPath, {
+        intraOpNumThreads: 2,
+        graphOptimizationLevel: 'all',
+      });
+      log.info(`reranker loaded in ${Date.now() - t0}ms`, { model: config.modelPath });
+    })().catch((err: unknown) => {
+      // Same rule as `getBrowser`: a memoized REJECTED promise would make
+      // every future call fail forever on what might have been a transient
+      // load error. Clear it so the next call actually retries.
+      loading = null;
+      throw err;
     });
-    log.info(`reranker loaded in ${Date.now() - t0}ms`, { model: config.modelPath });
-  })();
+  }
   await loading;
 }
 
@@ -60,5 +68,18 @@ export async function scoreRelevance(query: string, passage: string): Promise<nu
   const outputs = await session.run({ input_ids: inputIds, attention_mask: attentionMask });
   const firstKey = session.outputNames[0]!;
   const logits = outputs[firstKey]!.data as Float32Array;
-  return 1 / (1 + Math.exp(-logits[0]!));
+  // Sigmoid is only correct for a single-logit head. Asserted rather than
+  // just assumed — review flagged that a 2-logit classification head would
+  // need softmax instead, and the measured 0.0005-vs-0.98 score separation
+  // in the README is evidence for single-logit but was never actually
+  // checked against the model's real output shape.
+  if (logits.length !== 1) {
+    throw new Error(`PhoRanker output has ${logits.length} logits, expected exactly 1 for sigmoid scoring`);
+  }
+  const score = 1 / (1 + Math.exp(-logits[0]!));
+  // A NaN (e.g. from a genuinely empty output tensor slipping past the
+  // check above in some other way) would otherwise silently poison the
+  // `ranked.sort()` comparator in pipeline.ts and serialize as `null`.
+  if (!Number.isFinite(score)) throw new Error('PhoRanker produced a non-finite score');
+  return score;
 }

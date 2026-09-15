@@ -13,7 +13,8 @@ services:
       LOOKUPKIT_TOKEN_BUDGET: '200'
       LOOKUPKIT_CONFIDENT_THRESHOLD: '0.5'
       LOOKUPKIT_LOG_LEVEL: info
-    # Chromium's default 64MB /dev/shm is not enough for several pages at once
-    # and shows up as tabs crashing mid-navigation.
+    # The default 64MB /dev/shm is not enough for several pages at once and
+    # shows up as tabs crashing mid-navigation — matters for WebKit (the
+    # default engine) too, not just Chromium.
     shm_size: '1gb'
     restart: unless-stopped

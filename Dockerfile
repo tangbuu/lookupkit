@@ -41,11 +41,21 @@ ENV NODE_ENV=production \
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY package.json ./
-# ~136MB int8 cross-encoder plus its tokenizer. Baked in on purpose: a
-# container that downloads its model on boot fails in exactly the environments
-# where you most want it to just work.
+COPY package.json LICENSE NOTICE LICENSE-APACHE-2.0.txt ./
+# The tokenizer is small and stays in git; the ~130MB int8 model does not
+# (see scripts/fetch-model.mjs — GitHub hard-rejects any file over 100MB, so
+# it was removed from git history entirely). `models/` in the build context
+# still has the file today (present on disk locally, just gitignored), so
+# this COPY works right now unchanged; fetch-model.mjs's job is verifying
+# the checksum during the build either way, and actually downloading it in
+# any future build context (fresh clone, CI) where the file is genuinely
+# absent. This still bakes the model into the IMAGE, not just downloads it
+# at container boot — a container that fetches its model on every start
+# fails in exactly the environments where you most want it to just work;
+# this is a one-time cost at BUILD time.
+COPY scripts/fetch-model.mjs ./scripts/fetch-model.mjs
 COPY models ./models
+RUN node scripts/fetch-model.mjs
 
 # The Playwright image provides this unprivileged user, and its browsers are
 # installed where the user can reach them.

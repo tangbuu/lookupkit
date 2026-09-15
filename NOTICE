@@ -32,13 +32,18 @@ Mozilla Readability (npm dependency: @mozilla/readability)
 Source:  https://github.com/mozilla/readability
 License: Apache License 2.0
 
-Readability is a dependency rather than a vendored copy; its license text ships
-in node_modules/@mozilla/readability/LICENSE and is reproduced by npm in any
-distribution of the dependency tree. The Apache-2.0 notice above applies to it
-equally.
+Readability is a dependency rather than a vendored copy. Note that
+node_modules/@mozilla/readability/LICENSE.md is a short header only (a
+copyright line plus a pointer to the license URL), NOT the full license
+text — the full text is reproduced locally at LICENSE-APACHE-2.0.txt in
+this repository, copied verbatim from Playwright's own bundled Apache-2.0
+LICENSE file. This satisfies Apache-2.0 §4(a) ("give any other recipients
+a copy of this License") for every Apache-2.0 component this project
+redistributes: PhoRanker, Readability, and Playwright itself.
 
 ---------------------------------------------------------------------------
 Other dependencies
 ---------------------------------------------------------------------------
-playwright (Apache-2.0), jsdom (MIT), onnxruntime-node (MIT). Their license
-texts ship with the packages in node_modules.
+playwright (Apache-2.0 — full text at LICENSE-APACHE-2.0.txt, same file as
+above), jsdom (MIT), onnxruntime-node (MIT). The MIT texts ship with the
+packages in node_modules.
