@@ -29,7 +29,7 @@ const modelPath = path.join(repoRoot, 'models', 'phoranker_int8.onnx');
 // baked into the build context). Overridable so a fork can point at its
 // own release without editing this file.
 const DEFAULT_MODEL_URL =
-  'https://github.com/REPLACE_WITH_OWNER/lookupkit/releases/download/v0.1.0/phoranker_int8.onnx';
+  'https://github.com/tangbuu/lookupkit/releases/download/v0.1.0/phoranker_int8.onnx';
 const MODEL_URL = process.env.LOOKUPKIT_MODEL_URL ?? DEFAULT_MODEL_URL;
 
 // Computed from the actual file this project ships — verify what you
