@@ -157,14 +157,26 @@ async function installBlocking(page: Page): Promise<void> {
 }
 
 /**
- * One throwaway context per page load. Contexts are cheap in Chromium and
- * isolate cookies/storage between the sites we visit, so a consent banner or
- * tracking cookie picked up on one candidate cannot leak into the next.
+ * One throwaway context per page load, up to `config.maxUrls` (5) of these
+ * running concurrently from `runLookup()`'s `Promise.all`-style fan-out.
+ * Isolates cookies/storage between the sites we visit, so a consent banner
+ * or tracking cookie picked up on one candidate cannot leak into the next.
  *
  * This isolation is specifically about FETCH targets — arbitrary,
  * unrelated third-party sites where one candidate's cookies must never
  * touch another's. It does not apply to the two fixed search engines; see
  * {@link withSearchPage}.
+ *
+ * Concurrent contexts are cheap on THIS stack too, not just on the reference
+ * Dart app's native WKWebView — measured directly (`scripts/probe-context-cost.mts`,
+ * webkit engine, local instant target to isolate context-creation cost from
+ * network variance, 5 rounds/level): going from 1-at-a-time to 5-concurrent
+ * contexts dropped mean per-context time from ~203ms to ~44ms (parallelism
+ * amortizes fixed overhead, it does not add per-context penalty) and grew
+ * real OS-level browser-process-tree RSS by well under 1MB per 5-way batch
+ * after the first-ever context's one-time ~43MB warmup. So a 5-way parallel
+ * batch here is both faster AND cheaper per candidate than doing the same 5
+ * one at a time — no pooling or fan-out reduction is warranted.
  */
 export async function withPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
   const b = await getBrowser();
